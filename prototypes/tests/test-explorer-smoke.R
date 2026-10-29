@@ -38,6 +38,13 @@ test_that("server computes every comparison and reacts to pathway edits", {
     session$elapse(500)
     expect_lt(cmp_dc()$rho, 1)
 
+    # The Overall vs Pathways tab follows the Default / Custom switch
+    session$setInputs(tab1_version = "default")
+    expect_equal(cmp_tab1()$rho, cmp_od()$rho)
+    session$setInputs(tab1_version = "custom")
+    expect_equal(cmp_tab1()$rho, cmp_oc()$rho)
+    expect_true("Fire Risk" %in% attr(res_tab1(), "pathways")$name)
+
     # Parks and a recalculated region
     session$setInputs(unit = "park", group = "Region", region = "Intermountain Region")
     expect_match(glabel(), "recalculated|national scores")

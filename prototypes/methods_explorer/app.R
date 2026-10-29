@@ -221,6 +221,10 @@ sidebar_ui <- sidebar(
 tab_overview <- nav_panel(
   "Overall vs Pathways",
   uiOutput("ctx1"),
+  radioButtons("tab1_version", "Pathways version compared with the Overall Index",
+               c("Default pathways" = "default",
+                 "Custom pathways (from the Pathway Builder)" = "custom"),
+               inline = TRUE),
   uiOutput("boxes1"),
   layout_columns(col_widths = c(6, 6),
     card(full_screen = TRUE, card_header(textOutput("map_a_title", inline = TRUE)),
@@ -234,7 +238,8 @@ tab_overview <- nav_panel(
          div(class = "note", "Rows: how many pathways the unit is High in. Columns: its quartile under the Overall Index (4 = top 25%, the V1 Priority group).")),
     card(full_screen = TRUE, card_header("Rank agreement"),
          plotlyOutput("scatter1", height = 340),
-         div(class = "note", "Points on the dotted line rank the same under both methods. Above the line = ranked as more vulnerable under pathways."))
+         div(class = "note", "Points on the dotted line rank the same under both methods. Above the line = ranked as more vulnerable under pathways."),
+         uiOutput("rank_note"))
   ),
   layout_columns(col_widths = c(5, 7),
     card(full_screen = TRUE, card_header("What each pathway flags, relative to Overall Priority"),
@@ -492,15 +497,22 @@ server <- function(input, output, session) {
   cmp_oc <- reactive(unit_compare(res_overall(), res_custom(), input$unit, park_agg(), input$top_n))
   cmp_dc <- reactive(unit_compare(res_default(), res_custom(), input$unit, park_agg(), input$top_n))
 
+  # The Overall vs Pathways tab shows either pathway version; the Builder tab
+  # always compares both, so it keeps using cmp_od() / cmp_oc() directly.
+  tab1_custom <- reactive(identical(input$tab1_version, "custom"))
+  res_tab1 <- reactive(if (tab1_custom()) res_custom() else res_default())
+  cmp_tab1 <- reactive(if (tab1_custom()) cmp_oc() else cmp_od())
+  tab1_name <- reactive(if (tab1_custom()) "Custom pathways" else "Default pathways")
+
   # Tab 1: Overall vs Pathways -------------------------------------------------
   output$boxes1 <- renderUI({
-    cm <- cmp_od(); o <- res_overall(); d <- res_default()
+    cm <- cmp_tab1(); o <- res_overall(); d <- res_tab1()
     n_pri_o <- sum(o$m_priority); n_pri_d <- sum(d$m_priority)
     pri_flag <- mean(d$n_high[o$m_priority] >= 1)
     layout_columns(col_widths = c(3, 3, 3, 3),
       vbox(paste("Rank correlation,", unit_label()), fmt_rho(cm$rho), rho_words(cm$rho)),
       vbox(paste0("Top-", input$top_n, " overlap"), fmt_pct(cm$top$overlap),
-           paste0(cm$top$shared, " shared (", cm$top$n_a, " overall, ", cm$top$n_b, " pathways in top set)")),
+           paste0(cm$top$shared, " shared (", cm$top$n_a, " overall, ", cm$top$n_b, " ", tolower(tab1_name()), " in top set)")),
       vbox("Priority supplies", paste0(n_pri_o, " vs ", n_pri_d),
            paste0("Overall top 25% vs High in >= ", input$min_high, " pathway(s), of ", nrow(o)),
            COL_HIGH),
@@ -516,10 +528,10 @@ server <- function(input, output, session) {
     m
   }
   output$map_a_title <- renderText(paste0("Overall Index: Priority ", unit_label(), " (", glabel(), ")"))
-  output$map_b_title <- renderText(paste0("Pathway Indices: sized by # High pathways (", glabel(), ")"))
+  output$map_b_title <- renderText(paste0(tab1_name(), ": sized by # High pathways (", glabel(), ")"))
 
   output$map_a <- renderLeaflet({
-    j <- cmp_od()$joined %>% filter(!is.na(lng), !is.na(lat))
+    j <- cmp_tab1()$joined %>% filter(!is.na(lng), !is.na(lat))
     j$pri <- dplyr::coalesce(j$pri_a, FALSE)
     j <- arrange(j, pri)
     lab <- if (input$unit == "supply") "Priority (top 25%)" else "Park with a Priority supply"
@@ -531,7 +543,7 @@ server <- function(input, output, session) {
       addLegend("bottomright", colors = c(COL_HIGH, COL_NONE), labels = c(lab, "Other"), opacity = 0.8)
   })
   output$map_b <- renderLeaflet({
-    j <- cmp_od()$joined %>% filter(!is.na(lng), !is.na(lat)) %>% arrange(n_high)
+    j <- cmp_tab1()$joined %>% filter(!is.na(lng), !is.na(lat)) %>% arrange(n_high)
     mx <- max(5, j$n_high, na.rm = TRUE)
     pal <- colorNumeric(c("#C9CED2", "#E3A07A", COL_HIGH), domain = c(0, mx))
     map_base() %>%
@@ -544,16 +556,17 @@ server <- function(input, output, session) {
   })
 
   output$xtab1 <- renderPlotly({
-    j <- cmp_od()$joined
+    j <- cmp_tab1()$joined
     count_heatmap(j$quart_a, j$n_high, "Overall quartile", "# High pathways",
-                  paste0(tools::toTitleCase(unit_label()), ", ", glabel()))
+                  paste0(tools::toTitleCase(unit_label()), ", ", tab1_name(), ", ", glabel()))
   })
   output$scatter1 <- renderPlotly({
-    rank_scatter(cmp_od()$joined, "Overall", "Pathways",
-                 paste0("rho = ", fmt_rho(cmp_od()$rho), ", ", glabel()), color_by = "n_high")
+    rank_scatter(cmp_tab1()$joined, "Overall", "Pathways",
+                 paste0("rho = ", fmt_rho(cmp_tab1()$rho), ", ", tab1_name(), ", ", glabel()),
+                 color_by = "n_high")
   })
   output$pathway_bars <- renderPlotly({
-    o <- res_overall(); d <- res_default(); pw <- attr(d, "pathways")
+    o <- res_overall(); d <- res_tab1(); pw <- attr(d, "pathways")
     df <- do.call(rbind, lapply(seq_len(nrow(pw)), function(i) {
       h <- d[[paste0("path_", pw$key[i], "_high")]]
       data.frame(pathway = pw$name[i],
@@ -563,15 +576,15 @@ server <- function(input, output, session) {
     df$pathway <- factor(df$pathway, levels = rev(pw$name))
     plot_ly(df, y = ~pathway, x = ~n, color = ~group, type = "bar", orientation = "h",
             colors = c(COL_HIGH, "#E8B4A8")) %>%
-      layout(barmode = "stack", title = list(text = paste0("Water supplies, ", glabel()), font = list(size = 13)),
+      layout(barmode = "stack", title = list(text = paste0("Water supplies, ", tab1_name(), ", ", glabel()), font = list(size = 13)),
              xaxis = list(title = "Supplies High in pathway"), yaxis = list(title = ""),
              legend = list(orientation = "h", y = -0.2))
   })
 
   output$top_title <- renderText(paste0("Top-", input$top_n, " ", unit_label(),
-                                        " under either method (", glabel(), ")"))
+                                        " under the Overall Index or ", tolower(tab1_name()), " (", glabel(), ")"))
   output$top_table <- renderDT({
-    j <- cmp_od()$joined %>% filter(top_a | top_b) %>%
+    j <- cmp_tab1()$joined %>% filter(top_a | top_b) %>%
       mutate(In_top = case_when(top_a & top_b ~ "Both", top_a ~ "Overall only", TRUE ~ "Pathways only")) %>%
       arrange(pmin(pos_a, pos_b))
     out <- data.frame(Park = j$park_name, Unit = j$system,
@@ -582,6 +595,30 @@ server <- function(input, output, session) {
               options = list(pageLength = 10, scrollX = TRUE)) %>%
       formatStyle("In top-N", backgroundColor = styleEqual(
         c("Both", "Overall only", "Pathways only"), c("#E7EFE9", "#F3E3E3", "#ECE9F5")))
+  })
+
+  output$rank_note <- renderUI({
+    how <- switch(input$rank_rule,
+      count_then_mean = paste0(
+        "Each supply's pathway ranking score is its number of High pathways plus a ",
+        "tiebreaker: the mean of its pathway percentiles divided by 1,000 (so the count ",
+        "always dominates). A pathway percentile is the supply's percentile rank on that ",
+        "pathway's score among the supplies in the comparison group that have a score for it; ",
+        "a pathway with no data is left out of the mean."),
+      count = "Each supply's pathway ranking score is its number of High pathways. Ties are kept, so the percentiles fall in a few bands.",
+      max_pct = "Each supply's pathway ranking score is its highest pathway percentile.",
+      mean_pct = "Each supply's pathway ranking score is the mean of its pathway percentiles (pathways with no data left out).")
+    unit <- if (input$unit == "park") paste0(
+      " For parks, the park score is ",
+      switch(input$park_agg, max = "the highest supply score at the park",
+             mean = "the mean of its supplies' scores",
+             any = "the number of pathways High at any of its supplies, plus the same tiebreaker"),
+      ".") else ""
+    div(class = "note", style = "margin-top:6px;",
+        strong("Pathways percentile: "), how, unit,
+        " The axis value is the percentile rank (0 to 100, ties averaged) of that score among all ",
+        unit_label(), " in the comparison group. The Overall percentile is the same thing for the ",
+        "V1 VULNERABILITY score.")
   })
 
   # Tab 2: Builder results ------------------------------------------------------
